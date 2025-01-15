@@ -3,7 +3,10 @@ import config
 from collections import defaultdict
 import datetime
 from RequestManager import RequestManager
-from RequestObject import RequestObject, RequestObject_Event, RequestObject_Indicator
+# from RequestObject import RequestObject, RequestObject_Event, RequestObject_Indicator
+
+from misp_object import Indicator, MISPAttribute,MISPEvent
+
 from constants import *
 import sys
 from functools import reduce
@@ -12,6 +15,7 @@ import requests
 import json
 from datetime import datetime, timedelta
 from misp_stix_converter import MISPtoSTIX21Parser
+import pymisp
 from stix2.base import STIXJSONEncoder
 
 if config.misp_verifycert is False:
@@ -94,7 +98,7 @@ def _get_misp_events_stix():
             if len(result) > 0:
                 logger.info("Received MISP events page {} with {} events".format(misp_page, len(result)))
                 for event in result:
-                    misp_event = RequestObject_Event(event["Event"], logger, config.misp_flatten_attributes)
+                    misp_event = MISPEvent(event["Event"], logger, config.misp_flatten_attributes)
                     try:
                         parser = MISPtoSTIX21Parser()
                         parser.parse_misp_event(misp_event.event)
@@ -104,10 +108,10 @@ def _get_misp_events_stix():
                         continue
                     if config.write_parsed_eventid:
                         logger.info("Processing event {} {}".format(event["Event"]["id"], event["Event"]["info"]))
-                    for element in stix_objects:
-                        if element.type in UPLOAD_INDICATOR_API_ACCEPTED_TYPES and \
-                                        element.id not in misp_indicator_ids:
-                            misp_indicator = RequestObject_Indicator(element, misp_event, logger)
+                    for stix_object in stix_objects:
+                        if stix_object.type in UPLOAD_INDICATOR_API_ACCEPTED_TYPES and \
+                                stix_object.id not in misp_indicator_ids:
+                            misp_indicator = MISPAttribute(stix_object, misp_event, logger)
                             if misp_indicator.id:
                                 if misp_indicator.valid_until:
                                     valid_until = json.dumps(misp_indicator.valid_until, cls=STIXJSONEncoder).replace("\"", "")
@@ -122,7 +126,12 @@ def _get_misp_events_stix():
                                     if date_object > datetime.now():
                                         if config.verbose_log:
                                             logger.debug("Add {} to list of indicators to upload".format(misp_indicator.pattern))
+                                        if not config.use_event_confidence: misp_event.config = None
+                                        misp_indicator.confidence = (misp_indicator.confidence or
+                                                                     misp_event.confidence or config.default_confidence)
+
                                         misp_indicator_ids.append(misp_indicator.id)
+
                                         result_set.append(misp_indicator._get_dict())
                                     else:
                                         logger.error("Skipping outdated indicator {} in event {}, valid_until: {}".format(misp_indicator.pattern, misp_event.id, valid_until))
@@ -135,7 +144,7 @@ def _get_misp_events_stix():
             else:
                 remaining_misp_pages = False
 
-        except exceptions.MISPServerError as e:
+        except pymisp.exceptions.MISPServerError as e:
             remaining_misp_pages = False
             logger.error("Error received from the MISP server {} - {} - {}".format(e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1]))
         except Exception as e:
@@ -249,7 +258,7 @@ def main():
                 if attr['type'] == 'comment':
                     parsed_event['description'] += attr['value']
                 if attr['type'] in MISP_ACTIONABLE_TYPES and attr['to_ids'] == True:
-                    parsed_event['request_objects'].append(RequestObject(attr, parsed_event['description']))
+                    parsed_event['request_objects'].append(Indicator(attr, parsed_event['description']))
             for obj in event['Object']:
                 for attr in obj['Attribute']:
                     if attr['type'] == 'threat-actor':
@@ -257,7 +266,7 @@ def main():
                     if attr['type'] == 'comment':
                         parsed_event['description'] += attr['value']
                     if attr['type'] in MISP_ACTIONABLE_TYPES and attr['to_ids'] == True:
-                        parsed_event['request_objects'].append(RequestObject(attr, parsed_event['description']))
+                        parsed_event['request_objects'].append(Indicator(attr, parsed_event['description']))
             parsed_events.append(parsed_event)
         del events
         total_indicators = sum([len(v['request_objects']) for v in parsed_events])
